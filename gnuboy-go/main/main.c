@@ -126,24 +126,17 @@ void run_to_vblank()
   if (!skipFrame) {
       old_update = (update == &update1) ? &update2 : &update1;
 
-	  old_update = update;
-	  
-
-	  // Swap updates
-	  update = (update == &update1) ? &update2 : &update1;
-
 	  update->buffer = framebuffer;
 	  update->stride = fb.pitch;
       memcpy(update->palette, scan.pal2, 64 * sizeof(uint16_t));
-      
 	  
 	  // Diff framebuffers and send the update to video task
 	  // TODO: Somehow determine when to interlace properly
 	  odroid_buffer_diff(update->buffer, old_update->buffer, 
-	  hasPaletteUpdate ? update->palette : NULL, 
-      hasPaletteUpdate ? old_update->palette : NULL,
-      GAMEBOY_WIDTH, GAMEBOY_HEIGHT,
-      update->stride, PIXEL_MASK, 0, update->diff);
+		  hasPaletteUpdate ? update->palette : NULL, 
+		  hasPaletteUpdate ? old_update->palette : NULL,
+		  GAMEBOY_WIDTH, GAMEBOY_HEIGHT,
+		  update->stride, PIXEL_MASK, 0, update->diff);
 	  xQueueSend(vidQueue, &update, portMAX_DELAY);
 	  
 
@@ -638,6 +631,8 @@ void app_main(void)
     uint stopTime;
     uint totalElapsedTime = 0;
     uint actualFrameCount = 0;
+	uint skippedFrames = 0;
+
     odroid_gamepad_state lastJoysticState, joystick;
 
     ushort menuButtonFrameCount = 0;
@@ -766,6 +761,7 @@ void app_main(void)
 		const int frameTime = CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ * 1000000 / 50;
 		// Figure out if we should skip next frame
         skipFrame = (elapsedTime > frameTime);
+		skippedFrames += skipFrame;
 
 		// if (skipFrame) {
 		// 	printf("skipping frame because elapsedTime: %d\n", elapsedTime);
@@ -781,9 +777,11 @@ void app_main(void)
 		  // vTaskGetRunTimeStats(statsbuf);
 		  // printf("%s\n", statsbuf);
 		  
-          printf("FPS:%f, BATTERY:%d [%d]\n", fps, battery_state.millivolts, battery_state.percentage);
+          printf("FPS:%f, skipFrame: %d, BATTERY:%d [%d]\n", 
+				  fps, skippedFrames, battery_state.millivolts, battery_state.percentage);
 
           actualFrameCount = 0;
+		  skippedFrames = 0;
           totalElapsedTime = 0;
         }
     }
