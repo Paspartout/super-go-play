@@ -772,6 +772,7 @@ inline static void updatepalette(int i)
 	b = (c >> 10) & 0x1f;
 
 	PAL2[i] = (r << 11) | (g << (5 + 1)) | (b);
+	update_palette_dirty = 1;
 }
 
 inline void pal_write(int i, byte b)
@@ -805,7 +806,6 @@ void IRAM_ATTR pal_write_dmg(int i, int mapnum, byte d)
 		pal_write(i+j+1, c >> 8);
 	}
 
-	update_palette_dirty = 1;
 	/* printf("pal_write_dmg: i=%d, d=0x%x\n", i , d); */
 }
 
