@@ -625,6 +625,8 @@ void app_main(void)
     uint stopTime;
     uint totalElapsedTime = 0;
     uint actualFrameCount = 0;
+	uint skippedFrames = 0;
+
     odroid_gamepad_state lastJoysticState, joystick;
 
     ushort menuButtonFrameCount = 0;
@@ -753,6 +755,7 @@ void app_main(void)
 		const int frameTime = CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ * 1000000 / 50;
 		// Figure out if we should skip next frame
         skipFrame = (elapsedTime > frameTime);
+		skippedFrames += skipFrame;
 
 		// if (skipFrame) {
 		// 	printf("skipping frame because elapsedTime: %d\n", elapsedTime);
@@ -768,9 +771,11 @@ void app_main(void)
 		  // vTaskGetRunTimeStats(statsbuf);
 		  // printf("%s\n", statsbuf);
 		  
-          printf("FPS:%f, BATTERY:%d [%d]\n", fps, battery_state.millivolts, battery_state.percentage);
+          printf("FPS:%f, skipFrame: %d, BATTERY:%d [%d]\n", 
+				  fps, skippedFrames, battery_state.millivolts, battery_state.percentage);
 
           actualFrameCount = 0;
+		  skippedFrames = 0;
           totalElapsedTime = 0;
         }
     }

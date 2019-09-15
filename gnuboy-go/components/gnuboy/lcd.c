@@ -805,6 +805,7 @@ void IRAM_ATTR pal_write_dmg(int i, int mapnum, byte d)
 		pal_write(i+j+1, c >> 8);
 	}
 
+	update_palette_dirty = 1;
 	/* printf("pal_write_dmg: i=%d, d=0x%x\n", i , d); */
 }
 
@@ -876,7 +877,6 @@ void pal_dirty()
 			updatepalette(i);
 		}
 	}
-	update_palette_dirty = 1;
 }
 
 void lcd_reset()
