@@ -72,8 +72,8 @@ const char* StateFileName = "/storage/gnuboy.sav";
 
 struct update_meta {
 	odroid_scanline diff[GAMEBOY_HEIGHT];
-	bool skip_frame;
 	uint8_t *buffer;
+	uint16_t palette[64 * 2];
 	int stride;
 };	
 
@@ -118,20 +118,19 @@ void run_to_vblank()
     emu_step();
   }
 
+
   /* VBLANK BEGIN */
   if (!skipFrame) {
-	  uint8_t *old_buffer = update->buffer;
-	  odroid_scanline *old_diff = update->diff;
+	  struct update_meta* old_update = update;
 
 	  // Swap updates
 	  update = (update == &update1) ? &update2 : &update1;
 
 	  update->buffer = framebuffer;
 	  update->stride = fb.pitch;
+	  memcpy(update->palette, scan.pal2, 64 * sizeof(uint16_t));
 
-	  // Diff framebuffers and send the update to video task
-	  // TODO: Somehow determine when to interlace properly
-	  odroid_buffer_diff(update->buffer, old_buffer, NULL, NULL,
+	  odroid_buffer_diff(update->buffer, old_update->buffer, update->palette, old_update->palette,
 			  GAMEBOY_WIDTH, GAMEBOY_HEIGHT,
 			  update->stride, PIXEL_MASK, 0, update->diff);
 	  xQueueSend(vidQueue, &update, portMAX_DELAY);
@@ -202,7 +201,7 @@ void videoTask(void *arg)
             previous_scale_enabled = scaling_enabled;
             if (scaling_enabled) {
 				// TODO: Scaling looks kinda ugly compared to old gnuboy, not sure how to fix that
-                odroid_display_set_scale(GAMEBOY_WIDTH, GAMEBOY_HEIGHT, 1.f);
+                odroid_display_set_scale(GAMEBOY_WIDTH, GAMEBOY_HEIGHT, 1.0f);
             } else {
                 odroid_display_reset_scale(GAMEBOY_WIDTH, GAMEBOY_HEIGHT);
             }
@@ -210,13 +209,8 @@ void videoTask(void *arg)
 		
 		// TODO: For palette diffing scan.pal2 probably needs to get changed
 		//       to a buffered thing. Maybe change update_meta to contain a the palette?
-		bool full_update = scale_changed;
-		if (update_palette_dirty) {
-			update_palette_dirty = 0;
-			full_update = true;
-		}
-		ili9341_write_frame_8bit(update->buffer, full_update || update->skip_frame ? NULL : update->diff,
-				GAMEBOY_WIDTH, GAMEBOY_HEIGHT, fb.pitch, PIXEL_MASK, scan.pal2);
+		ili9341_write_frame_8bit(update->buffer, scale_changed ? NULL : update->diff,
+				GAMEBOY_WIDTH, GAMEBOY_HEIGHT, fb.pitch, PIXEL_MASK, update->palette);
 
         odroid_input_battery_level_read(&battery_state);
 
@@ -733,8 +727,8 @@ void app_main(void)
           elapsedTime = ((uint64_t)stopTime + (uint64_t)0xffffffff) - (startTime);
 		}
 
-        totalElapsedTime += elapsedTime;
-        ++frame;
+		totalElapsedTime += elapsedTime;
+		++frame;
 
 		// Cycle budget we can spend to emulate one frame to reach roughly 60 fps
 		const int frameTime = CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ * 1000000 / 50;
@@ -747,21 +741,21 @@ void app_main(void)
 		// }
 
 		// Display statistics every 60fps
-        ++actualFrameCount;
-        if (actualFrameCount == 60)
-        {
-          float seconds = totalElapsedTime / (CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ * 1000000.0f); // 240000000.0f; // (240Mhz)
-          float fps = actualFrameCount / seconds;
+		++actualFrameCount;
+		if (actualFrameCount == 60)
+		{
+			float seconds = totalElapsedTime / (CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ * 1000000.0f); // 240000000.0f; // (240Mhz)
+			float fps = actualFrameCount / seconds;
 
-		  // vTaskGetRunTimeStats(statsbuf);
-		  // printf("%s\n", statsbuf);
-		  
-          printf("FPS:%f, skipFrame: %d, BATTERY:%d [%d]\n", 
-				  fps, skippedFrames, battery_state.millivolts, battery_state.percentage);
+			// vTaskGetRunTimeStats(statsbuf);
+			// printf("%s\n", statsbuf);
 
-          actualFrameCount = 0;
-		  skippedFrames = 0;
-          totalElapsedTime = 0;
-        }
-    }
+			printf("FPS:%f, skipFrame: %d, BATTERY:%d [%d]\n", 
+					fps, skippedFrames, battery_state.millivolts, battery_state.percentage);
+
+			actualFrameCount = 0;
+			skippedFrames = 0;
+			totalElapsedTime = 0;
+		}
+	}
 }
