@@ -44,12 +44,14 @@ extern int debug_trace;
 
 struct fb fb;
 struct pcm pcm;
+extern struct scan scan;
 
+int skipFrame = 0;
 
 uint16_t* displayBuffer[2]; //= { fb0, fb0 }; //[160 * 144];
-uint8_t currentBuffer;
+uint8_t currentBuffer; // index for display_buffer
+uint16_t* framebuffer; // pointer to currentBuffer
 
-uint16_t* framebuffer;
 int frame = 0;
 uint elapsedTime = 0;
 
@@ -64,6 +66,19 @@ const char* StateFileName = "/storage/gnuboy.sav";
 
 #define GAMEBOY_WIDTH (160)
 #define GAMEBOY_HEIGHT (144)
+
+#define PIXEL_MASK 0x3F
+
+struct update_meta {
+	odroid_scanline diff[GAMEBOY_HEIGHT];
+	uint8_t *buffer;
+	uint16_t palette[64];
+	int stride;
+};	
+
+static struct update_meta update1 = {0,};
+static struct update_meta update2 = {0,};
+static struct update_meta *update = &update2;
 
 #define AUDIO_SAMPLE_RATE (32000)
 
@@ -104,21 +119,28 @@ void run_to_vblank()
   }
 
   /* VBLANK BEGIN */
+  if (!skipFrame) {
+	  struct update_meta* old_update = update;
 
-  //vid_end();
-  if ((frame % 2) == 0)
-  {
-      xQueueSend(vidQueue, &framebuffer, portMAX_DELAY);
+	  // Swap updates
+	  update = (update == &update1) ? &update2 : &update1;
 
-      // swap buffers
-      currentBuffer = currentBuffer ? 0 : 1;
-      framebuffer = displayBuffer[currentBuffer];
+	  update->buffer = framebuffer;
+	  update->stride = fb.pitch;
+	  memcpy(update->palette, scan.pal2, 64 * sizeof(uint16_t));
 
-      fb.ptr = framebuffer;
+	  odroid_buffer_diff(update->buffer, old_update->buffer, update->palette, old_update->palette,
+			  GAMEBOY_WIDTH, GAMEBOY_HEIGHT,
+			  update->stride, PIXEL_MASK, 0, update->diff);
+	  xQueueSend(vidQueue, &update, portMAX_DELAY);
+
+	  // Swap framebuffers
+	  currentBuffer = currentBuffer ? 0 : 1;
+	  framebuffer = displayBuffer[currentBuffer];
+	  fb.ptr = framebuffer;
   }
 
   rtc_tick();
-
   sound_mix();
 
   //if (pcm.pos > 100)
@@ -156,37 +178,56 @@ volatile bool videoTaskIsRunning = false;
 bool scaling_enabled = true;
 bool previous_scale_enabled = true;
 
+static void update_scaling() {
+    if (scaling_enabled) {
+        odroid_display_set_scale(GAMEBOY_WIDTH, GAMEBOY_HEIGHT, 1.0f);
+    } else {
+        odroid_display_reset_scale(GAMEBOY_WIDTH, GAMEBOY_HEIGHT);
+    }
+}
+
 void videoTask(void *arg)
 {
   esp_err_t ret;
 
   videoTaskIsRunning = true;
+  struct update_meta *update = NULL;
+  uint16_t display_palette[64] = {0, };
 
-  uint16_t* param;
   while(1)
   {
-        xQueuePeek(vidQueue, &param, portMAX_DELAY);
+        xQueuePeek(vidQueue, &update, portMAX_DELAY);
 
-        if (param == 1)
-            break;
+        if (update == 1)
+			break;
+		
+		bool scale_changed = (previous_scale_enabled != scaling_enabled);
 
-        if (previous_scale_enabled != scaling_enabled)
+        if (scale_changed)
         {
-            // Clear display
-            ili9341_write_frame_gb(NULL, true);
+            ili9341_blank_screen();
+            update_scaling();
             previous_scale_enabled = scaling_enabled;
         }
 
-        ili9341_write_frame_gb(param, scaling_enabled);
+        // Do endian swap on the palette for displaying
+        // TODO: Only needs to be when palette was updated, probably add flag to update
+        for(int i = 0; i < PIXEL_MASK+1; i++) {
+            const uint16_t pix = update->palette[i];
+            display_palette[i] =  pix << 8 | pix >> 8;
+        }
+		
+		ili9341_write_frame_8bit(update->buffer, scale_changed ? NULL : update->diff,
+				GAMEBOY_WIDTH, GAMEBOY_HEIGHT, fb.pitch, PIXEL_MASK, display_palette);
+
         odroid_input_battery_level_read(&battery_state);
 
-        xQueueReceive(vidQueue, &param, portMAX_DELAY);
+        xQueueReceive(vidQueue, &update, portMAX_DELAY);
     }
 
 
     // Draw hourglass
     odroid_display_lock();
-
     odroid_display_show_hourglass();
 
     odroid_display_unlock();
@@ -513,14 +554,18 @@ void app_main(void)
     loader_init(NULL);
 
     // Clear display
-    ili9341_write_frame_gb(NULL, true);
+    ili9341_blank_screen();
+
+    // Setup scaling
+    scaling_enabled = odroid_settings_ScaleDisabled_get(ODROID_SCALE_DISABLE_GB) ? false : true;
+    update_scaling();
 
     // Audio hardware
     odroid_audio_init(odroid_settings_AudioSink_get(), AUDIO_SAMPLE_RATE);
 
     // Allocate display buffers
-    displayBuffer[0] = heap_caps_malloc(160 * 144 * 2, MALLOC_CAP_8BIT | MALLOC_CAP_DMA);
-    displayBuffer[1] = heap_caps_malloc(160 * 144 * 2, MALLOC_CAP_8BIT | MALLOC_CAP_DMA);
+    displayBuffer[0] = heap_caps_malloc(GAMEBOY_WIDTH * GAMEBOY_HEIGHT, MALLOC_CAP_8BIT | MALLOC_CAP_DMA);
+    displayBuffer[1] = heap_caps_malloc(GAMEBOY_WIDTH * GAMEBOY_HEIGHT, MALLOC_CAP_8BIT | MALLOC_CAP_DMA);
 
     if (displayBuffer[0] == 0 || displayBuffer[1] == 0)
         abort();
@@ -529,7 +574,7 @@ void app_main(void)
 
     for (int i = 0; i < 2; ++i)
     {
-        memset(displayBuffer[i], 0, 160 * 144 * 2);
+        memset(displayBuffer[i], 0, GAMEBOY_WIDTH * GAMEBOY_HEIGHT);
     }
 
     printf("app_main: displayBuffer[0]=%p, [1]=%p\n", displayBuffer[0], displayBuffer[1]);
@@ -545,9 +590,8 @@ void app_main(void)
     vidQueue = xQueueCreate(1, sizeof(uint16_t*));
     audioQueue = xQueueCreate(1, sizeof(uint16_t*));
 
-    xTaskCreatePinnedToCore(&videoTask, "videoTask", 1024, NULL, 5, NULL, 1);
-    xTaskCreatePinnedToCore(&audioTask, "audioTask", 2048, NULL, 5, NULL, 1); //768
-
+    xTaskCreatePinnedToCore(&videoTask, "videoTask", 2048, NULL, 5, NULL, 1);
+    xTaskCreatePinnedToCore(&audioTask, "audioTask", 2048, NULL, 5, NULL, 0); //768
 
     //debug_trace = 1;
 
@@ -564,7 +608,7 @@ void app_main(void)
     memset(&fb, 0, sizeof(fb));
     fb.w = 160;
   	fb.h = 144;
-  	fb.pelsize = 2;
+  	fb.pelsize = 1;
   	fb.pitch = fb.w * fb.pelsize;
   	fb.indexed = 0;
   	fb.ptr = framebuffer;
@@ -606,6 +650,7 @@ void app_main(void)
     uint stopTime;
     uint totalElapsedTime = 0;
     uint actualFrameCount = 0;
+    uint skippedFrames = 0;
     odroid_gamepad_state lastJoysticState;
 
     ushort menuButtonFrameCount = 0;
@@ -616,9 +661,6 @@ void app_main(void)
     {
         emu_reset();
     }
-
-
-    scaling_enabled = odroid_settings_ScaleDisabled_get(ODROID_SCALE_DISABLE_GB) ? false : true;
 
     odroid_input_gamepad_read(&lastJoysticState);
 
@@ -685,11 +727,11 @@ void app_main(void)
             odroid_settings_ScaleDisabled_set(ODROID_SCALE_DISABLE_GB, scaling_enabled ? 0 : 1);
         }
 
-		// Cycle through palets
-		if (joystick.values[ODROID_INPUT_SELECT] && !lastJoysticState.values[ODROID_INPUT_LEFT] && joystick.values[ODROID_INPUT_LEFT])
+        // Cycle through palets
+        if (joystick.values[ODROID_INPUT_SELECT] && !lastJoysticState.values[ODROID_INPUT_LEFT] && joystick.values[ODROID_INPUT_LEFT])
         {
-			pal_next();
-			odroid_settings_GBPalette_set(pal_get());
+            pal_next();
+            odroid_settings_GBPalette_set(pal_get());
         }
 
         if (joystick.values[ODROID_INPUT_SELECT] && !lastJoysticState.values[ODROID_INPUT_RIGHT] && joystick.values[ODROID_INPUT_RIGHT])
@@ -709,33 +751,43 @@ void app_main(void)
         pad_set(PAD_A, joystick.values[ODROID_INPUT_A]);
         pad_set(PAD_B, joystick.values[ODROID_INPUT_B]);
 
-
+        // Emulate system for one frame
         startTime = xthal_get_ccount();
         run_to_vblank();
         stopTime = xthal_get_ccount();
 
-
         lastJoysticState = joystick;
 
-
-        if (stopTime > startTime)
-          elapsedTime = (stopTime - startTime);
-        else
-          elapsedTime = ((uint64_t)stopTime + (uint64_t)0xffffffff) - (startTime);
+        // Measure fps/speed
+        if (stopTime > startTime) {
+            elapsedTime = (stopTime - startTime);
+        } else {
+            // Handle overflown cycle counter
+            elapsedTime = ((uint64_t)stopTime + (uint64_t)0xffffffff) - (startTime);
+        }
 
         totalElapsedTime += elapsedTime;
         ++frame;
-        ++actualFrameCount;
 
+        // Cycle budget we can spend to emulate one frame to reach roughly 60 fps
+        const int frameTime = CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ * 1000000 / 50;
+        // Figure out if we should skip next frame
+        skipFrame = (elapsedTime > frameTime);
+        skippedFrames += skipFrame;
+
+        // Display statistics every 60fps
+        ++actualFrameCount;
         if (actualFrameCount == 60)
         {
-          float seconds = totalElapsedTime / (CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ * 1000000.0f); // 240000000.0f; // (240Mhz)
-          float fps = actualFrameCount / seconds;
+            float seconds = totalElapsedTime / (CONFIG_ESP32_DEFAULT_CPU_FREQ_MHZ * 1000000.0f); // 240000000.0f; // (240Mhz)
+            float fps = actualFrameCount / seconds;
 
-          printf("HEAP:0x%x, FPS:%f, BATTERY:%d [%d]\n", esp_get_free_heap_size(), fps, battery_state.millivolts, battery_state.percentage);
+            printf("GAME_FPS:%f, DISPLAYED_FPS: %d, SKIPPED_FRAMES: %d, BATTERY:%d [%d]\n", 
+                    fps, (int)fps-skippedFrames, skippedFrames, battery_state.millivolts, battery_state.percentage);
 
-          actualFrameCount = 0;
-          totalElapsedTime = 0;
+            actualFrameCount = 0;
+            skippedFrames = 0;
+            totalElapsedTime = 0;
         }
-    }
+    } // while(true)
 }

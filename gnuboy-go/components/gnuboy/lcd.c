@@ -72,6 +72,8 @@ static int palettes[8][4] = {GB_DEFAULT_PALETTE,
 static int current_palette = 1;
 static int nr_of_palettes = 8;
 
+// Imorted from main.c
+extern int skipFrame;
 					
 static int sprsort = 1;
 static int sprdebug = 0;
@@ -694,14 +696,14 @@ void IRAM_ATTR lcd_refreshline()
 	WT = (L - WY) >> 3;
 	WV = (L - WY) & 7;
 
-	if ((frame % 2) == 0)
+	if (!skipFrame)
 	{
 		if (!(R_LCDC & 0x80))
 		{
 			if (!lastLcdDisabled)
 			{
-				memset(displayBuffer[0], 0xff, 144 * 160 * 2);
-				memset(displayBuffer[1], 0xff, 144 * 160 * 2);
+				memset(displayBuffer[0], 0xff, 144 * 160);
+				memset(displayBuffer[1], 0xff, 144 * 160);
 
 				lastLcdDisabled = 1;
 			}
@@ -710,7 +712,6 @@ void IRAM_ATTR lcd_refreshline()
 		}
 
 		lastLcdDisabled = 0;
-
 
 		spr_enum();
 		tilebuf();
@@ -736,10 +737,9 @@ void IRAM_ATTR lcd_refreshline()
 		dest = vdest;
 
 		int cnt = 160;
-		un16* dst = (un16*)dest;
 		byte* src = BUF;
 
-		while (cnt--) *(dst++) = PAL2[*(src++)];
+		memcpy(dest, src, cnt);
 	}
 
 	vdest += fb.pitch;
